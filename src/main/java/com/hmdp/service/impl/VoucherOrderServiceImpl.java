@@ -10,6 +10,7 @@ import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.service.IVoucherService;
 import com.hmdp.utils.RedisIdWorker;
 import com.hmdp.utils.UserHolder;
+import org.springframework.aop.framework.AopContext;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -34,13 +35,11 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     @Resource
     private ISeckillVoucherService seckillVoucherService;
 
-    @Resource
-    private RedisIdWorker RedisIdWorker;
     @Autowired
     private RedisIdWorker redisIdWorker;
 
+
     @Override
-    @Transactional
     public Result seckillVoucher(Long id) {
         // 1. 查询优惠券
         SeckillVoucher seckillVoucher = seckillVoucherService.getById(id);
@@ -56,18 +55,41 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             return Result.fail("活动已经结束。");
         }
         // 4. 判断库存是否充足
-        if (seckillVoucher.getStock() <= 0) {
+        if (seckillVoucher.getStock() < 1) {
             return Result.fail("库存不足。");
+        }
+        // 一人一单
+        Long userId = UserHolder.getUser().getId();
+        // ！！！为了保证一人一单且不对所有用户加锁，这里用userId对应的字符串（且必须采用intern方法指向字符串池中的保证是同一个字符串）作为对象锁。
+        synchronized (userId.toString().intern()) {
+            // TODO: 这里还不是特别了解，大概的原理是spring框架调用带有@Transactional注解的方法时，事务想要生效，还得利用代理来生效。
+            IVoucherOrderService voucherOrderService = (IVoucherOrderService) AopContext.currentProxy();
+            return voucherOrderService.createVoucherOrder(id);
+        }
+        // 这样一来就可以保证spring框架先提交事务，再释放锁。防止先释放锁，再提交事务带来的并发问题。（比如事务尚未提交，又有新的线程）
+    }
+
+    @Transactional
+    public Result createVoucherOrder(Long id) {
+        // 一人一单
+        Long userId = UserHolder.getUser().getId();
+        int count = query()
+                .eq("user_id", userId)
+                .eq("voucher_id", id).count();
+        if (count > 0) {
+            return Result.fail("一个人只能购买一次该优惠券。");
         }
         // 5. 扣减库存
         boolean success = seckillVoucherService.update()
                 .setSql("stock = stock - 1")
                 .eq("voucher_id", id)
-                // 乐观锁实现思路1 - 版本号
-                .eq("stock", seckillVoucher.getStock())
+                // 乐观锁实现思路1 - 版本号 - 这种情况会导致不能全部卖完
+//                .eq("stock", seckillVoucher.getStock())
+                // 直接把条件改成stock > 0，依赖mysql的行锁去解决，但这个很难说是一个乐观锁吧。。
+                .gt("stock", 0)
                 .update();
         if (!success) {
-            Result.fail("库存不足。");
+            return Result.fail("库存不足。");
         }
         // 6. 创建订单
         VoucherOrder voucherOrder = new VoucherOrder();
