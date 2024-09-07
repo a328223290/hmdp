@@ -2,7 +2,6 @@ package com.hmdp.service.impl;
 
 import cn.hutool.core.util.BooleanUtil;
 import cn.hutool.core.util.StrUtil;
-import cn.hutool.json.JSON;
 import cn.hutool.json.JSONUtil;
 import com.hmdp.dto.Result;
 import com.hmdp.entity.Shop;
@@ -44,7 +43,7 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
     }
 
     // 不解决缓存击穿问题的版本
-    public Shop queryWithPassThrough(Long id) {
+    private Shop queryWithPassThrough(Long id) {
         // 查询redis数据库，看是否命中(以json形式存储)
         String shopJson = stringRedisTemplate.opsForValue().get(CACHE_SHOP_KEY + id);
         // 如果命中，则直接返回命中的结果
@@ -70,7 +69,7 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
     }
 
     // 通过互斥锁解决缓存穿透问题的版本
-    public Shop queryWithMutex(Long id) {
+    private Shop queryWithMutex(Long id) {
         // 查询redis数据库，看是否命中(以json形式存储)
         String shopJson = stringRedisTemplate.opsForValue().get(CACHE_SHOP_KEY + id);
         // 如果命中，则直接返回命中的结果
@@ -116,13 +115,29 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         }
     }
 
-    private boolean tryLock(String key) {
-        Boolean flag = stringRedisTemplate.opsForValue().setIfAbsent(key, "1", LOCK_SHOP_TTL, TimeUnit.SECONDS);
-        return BooleanUtil.isTrue(flag);
-    }
-
-    private void unlock(String key) {
-        stringRedisTemplate.delete(key);
+    private Shop queryWithLogicalExpire(Long id) {
+        // 查询redis数据库，看是否命中(以json形式存储)
+        String shopJson = stringRedisTemplate.opsForValue().get(CACHE_SHOP_KEY + id);
+        // 如果命中，则直接返回命中的结果
+        if (StrUtil.isNotBlank(shopJson)) {
+            return JSONUtil.toBean(shopJson, Shop.class);
+        } else if ("".equals(shopJson)) {
+            // 如果缓存中为空字符串，则说明数据库中不存在该数据
+            return null;
+        }
+        // 如果未命中，则从数据库中查询
+        Shop shop = getById(id);
+        if (shop == null) {
+            // 往缓存加入空字符串，解决缓存穿透问题
+            stringRedisTemplate.opsForValue().set(CACHE_SHOP_KEY + id, "");
+            stringRedisTemplate.expire(CACHE_SHOP_KEY + id, CACHE_NULL_TTL, TimeUnit.MINUTES);
+            return null;
+        }
+        // 存入缓存，防止数据库压力过大
+        stringRedisTemplate.opsForValue().set(CACHE_SHOP_KEY + id, JSONUtil.toJsonStr(shop));
+        stringRedisTemplate.expire(CACHE_SHOP_KEY + id, CACHE_SHOP_TTL, TimeUnit.MINUTES);
+        // 返回结果
+        return shop;
     }
 
 
@@ -140,8 +155,20 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
             return Result.fail("更新商铺失败！");
         }
         // 删除缓存，而不是更新，防止写操作过多造成反复修改redis
+        // TODO: 反复修改redis是一种不好的行为吗？
         stringRedisTemplate.delete(CACHE_SHOP_KEY + shop.getId());
         // 返回结果
         return Result.ok();
     }
+
+    // util functions
+    private boolean tryLock(String key) {
+        Boolean flag = stringRedisTemplate.opsForValue().setIfAbsent(key, "1", LOCK_SHOP_TTL, TimeUnit.SECONDS);
+        return BooleanUtil.isTrue(flag);
+    }
+
+    private void unlock(String key) {
+        stringRedisTemplate.delete(key);
+    }
 }
+
