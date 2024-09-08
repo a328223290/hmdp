@@ -38,7 +38,7 @@ public class RedisIdWorker {
         // 采用redis自增生成唯一ID，以天为单位
         String date = now.format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
         // 自增长
-        String key = "incr" + keyPrefix + ":" + date;
+        String key = "incr:" + keyPrefix + ":" + date;
         long count = stringRedisTemplate.opsForValue().increment(key);
         // 3. 拼接并返回
         // TODO，这里采用了位运算。如果当天的订单数超过了2 ^ 32能表示的范围，其实会出问题。(不过2 ^ 32已经可以表示40亿了，能有这么多订单人都笑死。。)

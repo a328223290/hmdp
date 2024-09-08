@@ -9,9 +9,11 @@ import com.hmdp.service.IVoucherOrderService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.service.IVoucherService;
 import com.hmdp.utils.RedisIdWorker;
+import com.hmdp.utils.SimpleRedisLock;
 import com.hmdp.utils.UserHolder;
 import org.springframework.aop.framework.AopContext;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -37,6 +39,8 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
     @Autowired
     private RedisIdWorker redisIdWorker;
+    @Autowired
+    private StringRedisTemplate stringRedisTemplate;
 
 
     @Override
@@ -60,13 +64,29 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         }
         // 一人一单
         Long userId = UserHolder.getUser().getId();
+        // 采用synchronized关键字保证一人一单：无法处理集群的情况
         // ！！！为了保证一人一单且不对所有用户加锁，这里用userId对应的字符串（且必须采用intern方法指向字符串池中的保证是同一个字符串）作为对象锁。
-        synchronized (userId.toString().intern()) {
-            // TODO: 这里还不是特别了解，大概的原理是spring框架调用带有@Transactional注解的方法时，事务想要生效，还得利用代理来生效。
+//        synchronized (userId.toString().intern()) {
+//            // TODO: 这里还不是特别了解，大概的原理是spring框架调用带有@Transactional注解的方法时，事务想要生效，还得利用代理来生效。
+//            IVoucherOrderService voucherOrderService = (IVoucherOrderService) AopContext.currentProxy();
+//            return voucherOrderService.createVoucherOrder(id);
+//        }
+        // 这样一来就可以保证spring框架先提交事务，再释放锁。防止先释放锁，再提交事务带来的并发问题。（比如事务尚未提交，又有新的线程）
+
+        // 为了解决集群上锁问题，采用分布式锁
+        SimpleRedisLock lock = new SimpleRedisLock("order:" + userId, stringRedisTemplate);
+        // TODO: 时间稍微设置长一点防止debug的时候过期
+        boolean isLock = lock.tryLock(1200);
+        if (!isLock) {
+            return Result.fail("不能重复下单！");
+        }
+        // 这里采用try-finally语句真的很妙，就算出现报错，也可以及时把锁解开
+        try {
             IVoucherOrderService voucherOrderService = (IVoucherOrderService) AopContext.currentProxy();
             return voucherOrderService.createVoucherOrder(id);
+        } finally {
+            lock.unlock();
         }
-        // 这样一来就可以保证spring框架先提交事务，再释放锁。防止先释放锁，再提交事务带来的并发问题。（比如事务尚未提交，又有新的线程）
     }
 
     @Transactional
