@@ -11,6 +11,8 @@ import com.hmdp.service.IVoucherService;
 import com.hmdp.utils.RedisIdWorker;
 import com.hmdp.utils.SimpleRedisLock;
 import com.hmdp.utils.UserHolder;
+import org.redisson.api.RLock;
+import org.redisson.api.RedissonClient;
 import org.springframework.aop.framework.AopContext;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -41,6 +43,8 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     private RedisIdWorker redisIdWorker;
     @Autowired
     private StringRedisTemplate stringRedisTemplate;
+    @Resource
+    private RedissonClient redissonClient;
 
 
     @Override
@@ -74,9 +78,23 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         // 这样一来就可以保证spring框架先提交事务，再释放锁。防止先释放锁，再提交事务带来的并发问题。（比如事务尚未提交，又有新的线程）
 
         // 为了解决集群上锁问题，采用分布式锁
-        SimpleRedisLock lock = new SimpleRedisLock("order:" + userId, stringRedisTemplate);
-        // TODO: 时间稍微设置长一点防止debug的时候过期
-        boolean isLock = lock.tryLock(1200);
+//        SimpleRedisLock lock = new SimpleRedisLock("order:" + userId, stringRedisTemplate);
+//        // TODO: 时间稍微设置长一点防止debug的时候过期
+//        boolean isLock = lock.tryLock(1200);
+//        if (!isLock) {
+//            return Result.fail("不能重复下单！");
+//        }
+//        // 这里采用try-finally语句真的很妙，就算出现报错，也可以及时把锁解开
+//        try {
+//            IVoucherOrderService voucherOrderService = (IVoucherOrderService) AopContext.currentProxy();
+//            return voucherOrderService.createVoucherOrder(id);
+//        } finally {
+//            lock.unlock();
+//        }
+
+        // 改用Redisson提供的lock，可以保证可重入 + 重试
+        RLock lock = redissonClient.getLock("lock:order" + userId);
+        boolean isLock = lock.tryLock();
         if (!isLock) {
             return Result.fail("不能重复下单！");
         }
