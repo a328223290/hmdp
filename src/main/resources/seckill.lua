@@ -8,6 +8,8 @@
 local voucherId = ARGV[1]
 -- 1.2 用户id
 local userId = ARGV[2]
+-- 1.3 订单id
+local orderId = ARGV[3]
 
 -- 2. 数据key
 -- 2.1 库存key
@@ -32,6 +34,8 @@ end
 redis.call('incrby', stockKey, -1)
 -- 3.4 将userId存入当前优惠券的set集合
 redis.call('sadd', orderKey, userId)
+-- 3.5 发送消息到队列中 【！！注意，需要提前创建好队列，我这里提前用XGROUP CREATE stream.orders g1 0 MKSTREAM命令创建好了消费组】
+redis.call('xadd', 'stream.orders', '*', 'userId', userId, 'voucherId', voucherId, 'id', orderId)
 -- 3.5 返回0
 return 0
 
